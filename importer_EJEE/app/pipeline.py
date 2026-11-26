@@ -340,6 +340,7 @@ class Pipeline:
                                  error="Export failed. " + _last_error(out))
                 return False
             store.update_job(job["id"], bundle=str(out_file), bundle_sha=_sha(out_file))
+            copy_bundle(job, out_file)
             return True
 
         if stage == "upload":
@@ -406,6 +407,29 @@ def _failed_questions(run, stage) -> list[str]:
     section = progress.get("questions" if stage == "extract" else "node3", {}) or {}
     return sorted((k for k, v in section.items() if isinstance(v, dict) and not v.get("ok")),
                   key=lambda n: (len(n), n))
+
+
+def copy_bundle(job: dict, bundle: Path) -> None:
+    """Optional off-machine copy of every exported bundle.
+
+    ``EJEE_APP_BUNDLE_COPY`` names a folder (e.g. one a sync client such as
+    OneDrive uploads); bundles land in ``<folder>/<book>/``. A failed copy is
+    recorded on the job but never fails the part.
+    """
+    target = os.environ.get("EJEE_APP_BUNDLE_COPY")
+    if not target:
+        return
+    import shutil
+    book = re.sub(r'[<>:"/\\|?*]+', "_", job["source"]).strip(" .") or job["slug"]
+    dest = Path(target) / book / bundle.name
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".partial")
+        shutil.copyfile(bundle, tmp)
+        os.replace(tmp, dest)
+    except OSError as exc:
+        current = store.job(job["id"])["detail"] or {}
+        store.update_job(job["id"], detail={**current, "copy_error": f"{dest}: {exc}"})
 
 
 def _abstained(run, number) -> bool:

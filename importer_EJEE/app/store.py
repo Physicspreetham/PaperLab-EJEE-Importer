@@ -180,7 +180,7 @@ def missing_settings() -> list[dict]:
 # ---------------------------------------------------------------------- cart
 def cart() -> list[dict]:
     with connect() as c:
-        return [dict(r) for r in c.execute("SELECT * FROM cart ORDER BY added_at, source, part")]
+        return [dict(r) for r in c.execute("SELECT * FROM cart ORDER BY rowid")]  # order added
 
 
 def cart_add(slug, source, part, questions):
@@ -224,7 +224,7 @@ def enqueue_cart() -> list[int]:
     """Move every cart part into the job queue (one job per part)."""
     with connect() as c:
         ids = []
-        for row in c.execute("SELECT * FROM cart ORDER BY added_at, source, part").fetchall():
+        for row in c.execute("SELECT * FROM cart ORDER BY rowid").fetchall():  # books in the order added
             cur = c.execute(
                 "INSERT OR IGNORE INTO jobs (slug, source, part, questions, created_at, updated_at) "
                 "VALUES (?,?,?,?,?,?)", (row["slug"], row["source"], row["part"], row["questions"], now(), now()))

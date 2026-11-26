@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import urllib.parse
 import webbrowser
 from contextlib import asynccontextmanager
@@ -89,9 +90,29 @@ async def guard(request: Request, call_next):
     return response
 
 
+AUTO_RESUME_KINDS = {"restart", "network", "busy", "rate"}  # never 'meta' or 'auth': those need a person
+
+
+def _autoresume_loop():
+    """Unattended mode (``--auto-resume``): after a restart, sleep or network
+    drop, resume the queue once the free server/key checks pass again."""
+    worker.stop_flag.wait(20)  # give a co-started PaperLab time to come up
+    while not worker.stop_flag.is_set():
+        q = store.queue_state()
+        if q["paused"] and q["kind"] in AUTO_RESUME_KINDS and any(j["status"] == "queued" for j in store.jobs()):
+            try:
+                _preflight()
+                worker.resume()
+            except HTTPException:
+                pass  # still offline; try again later
+        worker.stop_flag.wait(120)
+
+
 def _startup():
     store.recover_interrupted()
     worker.start()
+    if os.environ.get("EJEE_APP_AUTORESUME") == "1":
+        threading.Thread(target=_autoresume_loop, name="ejee-autoresume", daemon=True).start()
     s = store.settings()
     if s["ejee_db"] and s["uploads"] and Path(s["ejee_db"]).is_file() and Path(s["uploads"]).is_dir():
         st = ejee_index.status(s["ejee_db"], s["uploads"])
@@ -493,7 +514,15 @@ def main():
     ap.add_argument("--public-host", action="append", default=[], metavar="NAME",
                     help="also answer for this exact host name (e.g. a tunnel); exposes the saved key and "
                          "password to anyone who reaches it")
+    ap.add_argument("--auto-resume", action="store_true",
+                    help="unattended: resume the queue by itself after a restart, sleep or network drop")
+    ap.add_argument("--bundle-copy", metavar="DIR",
+                    help="also copy every exported bundle into DIR/<book>/ (e.g. a OneDrive folder)")
     args = ap.parse_args()
+    if args.auto_resume:
+        os.environ["EJEE_APP_AUTORESUME"] = "1"
+    if args.bundle_copy:
+        os.environ["EJEE_APP_BUNDLE_COPY"] = str(Path(args.bundle_copy).resolve())
     if args.public_host:
         os.environ["EJEE_APP_PUBLIC_HOSTS"] = ",".join(
             filter(None, [os.environ.get("EJEE_APP_PUBLIC_HOSTS", ""), *args.public_host]))

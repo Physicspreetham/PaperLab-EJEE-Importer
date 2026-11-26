@@ -358,6 +358,25 @@ def test_tagging_abstention_publishes_untagged_but_errors_still_fail(env):
     assert not is_abstention({"ok": False, "errors": ["parse failed"], "raw_reply": "garbage"})
 
 
+def test_bundles_are_copied_off_machine_and_books_queue_in_added_order(env, monkeypatch):
+    import pipeline
+    import store
+    copy_dir = env["tmp"] / "OneDrive" / "PaperLab bundles"
+    monkeypatch.setenv("EJEE_APP_BUNDLE_COPY", str(copy_dir))
+    job_id = _job(env)  # "Test Book" part 1
+    worker = pipeline.Pipeline(runner=Recorder(), publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    worker.process(store.job(job_id))
+    assert store.job(job_id)["status"] == "done"
+    copied = list(copy_dir.rglob("*.plbundle"))
+    assert len(copied) == 1 and copied[0].parent.name == "Test Book" and copied[0].read_bytes() == b"PK fake bundle"
+    # Cart order = order added, not alphabetical (Z before A here).
+    store.cart_add("zz-book", "Zeta Book", 1, 15)
+    store.cart_add("aa-book", "Alpha Book", 1, 15)
+    new = store.enqueue_cart()
+    assert [store.job(i)["source"] for i in new] == ["Zeta Book", "Alpha Book"]
+
+
 def test_interrupted_job_is_requeued_paused_on_restart(env):
     import store
     job_id = _job(env)
