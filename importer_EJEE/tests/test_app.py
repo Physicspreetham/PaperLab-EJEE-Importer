@@ -394,6 +394,43 @@ def test_os_kill_pauses_instead_of_failing_the_part(env):
     assert store.job(job_id)["status"] == "done"
 
 
+def test_parallel_keys_share_the_queue_and_a_bad_key_only_benches_itself(env):
+    import time
+    import pipeline
+    import store
+    _job(env)  # Test Book part 1 queued, primary key "kkkk..."
+    store.cart_add(store.jobs()[0]["slug"], "Test Book", 2, 2)
+    store.enqueue_cart()
+    store.save_secrets({"extra_meta_keys": ["bad-key-0000", "good-key-1111"]})
+    assert store.meta_keys() == ["k" * 12, "bad-key-0000", "good-key-1111"]
+    base = Recorder()
+    used = []
+
+    def runner(phase, cfg_path, log_path, env_, args=(), on_proc=None):
+        used.append((phase, env_["META_API_KEY"]))
+        if phase == "extract" and env_["META_API_KEY"] == "bad-key-0000":
+            return 2, "1: {'ok': False, 'error': 'AuthenticationError: 401 invalid api key'}"
+        time.sleep(0.05)
+        return base(phase, cfg_path, log_path, env_, args, on_proc)
+
+    pool = pipeline.Pool(runner=runner, publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    pool.start()
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline and any(j["status"] != "done" for j in store.jobs()):
+            time.sleep(0.2)
+        jobs = store.jobs()
+        assert [j["status"] for j in jobs] == ["done", "done"], [(j["status"], j["error"]) for j in jobs]
+        assert not store.queue_state()["paused"]  # one bad key never stops the queue
+        assert any("bad-key" in (w.parked or "") or w.slot == 1 and w.parked for w in pool.workers)
+        assert pool.running()["workers"] == 3 and pool.active_count() == 2
+        keys = {k for p, k in used if p == "extract"}
+        assert "good-key-1111" in keys or "k" * 12 in keys
+    finally:
+        pool.shutdown()
+
+
 def test_interrupted_job_is_requeued_paused_on_restart(env):
     import store
     job_id = _job(env)

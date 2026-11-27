@@ -183,20 +183,29 @@ def child_env(meta_key: str | None) -> dict:
 
 # -------------------------------------------------------------------- worker
 class Pipeline:
-    def __init__(self, runner=default_runner, publisher=remote.publish):
+    """One worker. ``slot`` picks its Meta key (0 = primary key, 1.. = extra keys)."""
+
+    def __init__(self, runner=default_runner, publisher=remote.publish, slot=0, pool=None):
         self.runner = runner
         self.publisher = publisher
+        self.slot = slot
+        self.pool = pool
+        self.parked = None  # reason this worker's key is benched (others keep going)
         self.wake = threading.Event()
         self.stop_flag = threading.Event()
         self.current = None  # job id
         self.proc = None
         self.thread = None
 
+    def key(self) -> str | None:
+        keys = store.meta_keys()
+        return keys[self.slot] if self.slot < len(keys) else None
+
     # control ------------------------------------------------------------
     def start(self):
         if self.thread and self.thread.is_alive():
             return
-        self.thread = threading.Thread(target=self._loop, name="ejee-pipeline", daemon=True)
+        self.thread = threading.Thread(target=self._loop, name=f"ejee-pipeline-{self.slot}", daemon=True)
         self.thread.start()
 
     def resume(self):
@@ -219,10 +228,14 @@ class Pipeline:
     def _loop(self):
         while not self.stop_flag.is_set():
             q = store.queue_state()
-            nxt = None if q["paused"] else next((j for j in store.jobs() if j["status"] == "queued"), None)
+            idle = q["paused"] or self.parked or not self.key()
+            nxt = None if idle else store.claim_next_job()
             if nxt is None:
-                self.wake.wait(timeout=2)
-                self.wake.clear()
+                if self.pool:
+                    self.stop_flag.wait(2)  # shared queue: poll, never spin on a set event
+                else:
+                    self.wake.wait(timeout=2)
+                    self.wake.clear()
                 continue
             try:
                 self.process(nxt)
@@ -235,6 +248,13 @@ class Pipeline:
 
     def _pause_queue(self, job, stage, kind, message):
         store.update_job(job["id"], status="queued", stage=stage, error=message, error_kind=kind)
+        # A rejected or rate-limited key only benches this worker while other
+        # keys are still working; the last working key pauses the whole queue.
+        if kind in ("meta", "rate") and self.pool and self.pool.active_count() > 1:
+            import time
+            self.parked = f"key {self.slot + 1}: {message}"
+            self.parked_kind, self.parked_at = kind, time.time()
+            return
         store.set_queue(True, message, kind)
 
     def process(self, job):
@@ -252,7 +272,7 @@ class Pipeline:
                              error=f"Could not plan this part: {exc}")
             return
         log_path = run.parent / f"part-{job['part']:03d}.log"
-        env = child_env(secrets["meta_api_key"])
+        env = child_env(self.key() or secrets["meta_api_key"])
 
         for stage in STAGES:
             if stage in done:
@@ -394,6 +414,52 @@ class Pipeline:
             store.update_job(job["id"], receipt=receipt)
             return True
         raise ValueError(stage)
+
+
+class Pool:
+    """One worker per Meta API key, all taking parts from the same ordered queue."""
+
+    def __init__(self, runner=default_runner, publisher=remote.publish):
+        self.runner, self.publisher = runner, publisher
+        self.wake = threading.Event()
+        self.stop_flag = threading.Event()
+        self.workers: list[Pipeline] = []
+        self._lock = threading.Lock()
+
+    def ensure(self):
+        """Start workers up to the number of saved keys (call after Settings change)."""
+        with self._lock:
+            want = max(1, len(store.meta_keys()))
+            while len(self.workers) < want:
+                w = Pipeline(self.runner, self.publisher, slot=len(self.workers), pool=self)
+                w.wake, w.stop_flag = self.wake, self.stop_flag
+                self.workers.append(w)
+                w.start()
+
+    start = ensure
+
+    def active_count(self) -> int:
+        return sum(1 for w in self.workers if not w.parked and w.key())
+
+    def resume(self):
+        for w in self.workers:
+            w.parked = None
+        store.set_queue(False)
+        self.ensure()
+
+    def pause(self, reason="Paused by you. The current steps finish first.", kind="user"):
+        store.set_queue(True, reason, kind)
+
+    def shutdown(self):
+        self.stop_flag.set()
+        self.wake.set()
+        for w in self.workers:
+            if w.proc and w.proc.poll() is None:
+                w.proc.terminate()
+
+    def running(self) -> dict:
+        return {"jobs": [w.current for w in self.workers if w.current], "workers": len(self.workers),
+                "active": self.active_count(), "parked": [w.parked for w in self.workers if w.parked]}
 
 
 # ------------------------------------------------------------------ helpers

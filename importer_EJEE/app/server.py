@@ -50,7 +50,7 @@ def public_hosts() -> set[str]:
     raw = os.environ.get("EJEE_APP_PUBLIC_HOSTS", "")
     return {h.strip().lower() for h in raw.split(",") if h.strip()}
 
-worker = pipeline.Pipeline()
+worker = pipeline.Pool()
 
 
 @asynccontextmanager
@@ -98,6 +98,11 @@ def _autoresume_loop():
     drop, resume the queue once the free server/key checks pass again."""
     worker.stop_flag.wait(20)  # give a co-started PaperLab time to come up
     while not worker.stop_flag.is_set():
+        import time
+        for w in getattr(worker, "workers", []):  # rate-limited keys get another try after 15 min
+            if w.parked and getattr(w, "parked_kind", None) == "rate" and time.time() - w.parked_at > 900:
+                w.parked = None
+                print(f"{store.now()} auto-resume: key {w.slot + 1} back after rate-limit cooldown", flush=True)
         try:
             q = store.queue_state()
             if q["paused"] and q["kind"] in AUTO_RESUME_KINDS and any(j["status"] == "queued" for j in store.jobs()):
@@ -356,6 +361,7 @@ class SettingsBody(BaseModel):
     uploads: str | None = None
     meta_api_key: str | None = None
     archivist_password: str | None = None
+    extra_meta_keys: list[str] | None = None  # one parallel worker per key
 
 
 @app.get("/api/settings")
@@ -382,6 +388,7 @@ def put_settings(body: SettingsBody):
     before = store.settings()
     store.save_settings(values)
     store.save_secrets({k: values.get(k) for k in store.SECRET_KEYS})
+    worker.ensure()  # a newly added key starts its own worker right away
     after = store.settings()
     if (after["ejee_db"], after["uploads"]) != (before["ejee_db"], before["uploads"]) \
             and after["ejee_db"] and after["uploads"]:
@@ -404,7 +411,22 @@ def test_settings(body: TestBody):
                 raise HTTPException(400, "Save the server link and archivist password first.")
             return remote.check_server(s["server_url"], sec["archivist_password"])
         if body.what == "meta":
-            return remote.check_meta_key(sec["meta_api_key"], pipeline.model_base_url())
+            results = []
+            for i, key in enumerate(store.meta_keys(), 1):
+                try:
+                    r = remote.check_meta_key(key, pipeline.model_base_url())
+                    results.append({"key": i, "hint": f"…{key[-4:]}", **r})
+                except remote.RemoteError as exc:
+                    results.append({"key": i, "hint": f"…{key[-4:]}", "ok": False, "kind": exc.kind,
+                                    "detail": str(exc)})
+            bad = [r for r in results if not r["ok"]]
+            if not results:
+                raise remote.RemoteError("meta", "No Meta API key is set.")
+            return {"ok": not bad, "keys": results,
+                    "verified": all(r.get("verified") for r in results),
+                    "detail": "; ".join(f"key {r['key']} ({r['hint']}): {r['detail']}" for r in bad) or None,
+                    "note": f"{len(results)} key(s): " + ", ".join(
+                        f"{r['hint']} {'ok' if r['ok'] else 'REJECTED'}" for r in results)}
         if body.what == "source":
             _source_paths()
             return {"ok": True, "index": ejee_index.status(s["ejee_db"], s["uploads"])}
@@ -423,9 +445,18 @@ def _preflight():
     s, sec = store.settings(), store.secrets()
     try:
         remote.check_server(s["server_url"], sec["archivist_password"])
-        remote.check_meta_key(sec["meta_api_key"], pipeline.model_base_url())
     except remote.RemoteError as exc:
         raise HTTPException(400, {"message": str(exc), "kind": exc.kind})
+    errors = []
+    for i, key in enumerate(store.meta_keys(), 1):
+        try:
+            remote.check_meta_key(key, pipeline.model_base_url())
+            return  # at least one working key is enough to start; bad ones bench themselves
+        except remote.RemoteError as exc:
+            errors.append((exc, f"key {i}: {exc}"))
+    if errors:
+        exc = errors[0][0]
+        raise HTTPException(400, {"message": "; ".join(e[1] for e in errors), "kind": exc.kind})
 
 
 @app.get("/api/jobs")

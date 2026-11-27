@@ -163,6 +163,21 @@ def publish(url, password, bundle) -> dict:
     client = PaperLab(url, password)
     client.health()
     client.login()
+    send = client.import_bundle
+
+    def patient(path, dry_run):
+        # The server takes one import at a time; parallel workers queue up
+        # here instead of pausing everything on a 429/503 "busy".
+        import time
+        for attempt in range(30):
+            try:
+                return send(path, dry_run=dry_run)
+            except RemoteError as exc:
+                if exc.kind != "busy" or attempt == 29:
+                    raise
+                time.sleep(5 + 2 * attempt)
+
+    client.import_bundle = patient
     try:
         try:
             _status, preview = client.import_bundle(bundle, dry_run=True)

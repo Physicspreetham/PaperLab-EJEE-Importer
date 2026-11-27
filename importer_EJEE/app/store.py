@@ -25,7 +25,7 @@ ROOT = APP.parent  # importer_EJEE/
 STAGES = ["prepare", "extract", "figures", "pack", "classify", "verify", "export", "upload"]
 PAID_STAGES = {"extract", "classify"}
 SETTING_KEYS = ("server_url", "ejee_db", "uploads")
-SECRET_KEYS = ("meta_api_key", "archivist_password")
+SECRET_KEYS = ("meta_api_key", "archivist_password", "extra_meta_keys")
 
 _lock = threading.RLock()
 
@@ -128,7 +128,20 @@ def secrets() -> dict:
         data = json.loads(_secrets_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = {}
-    return {k: data.get(k) or "" for k in SECRET_KEYS}
+    out = {k: data.get(k) or "" for k in SECRET_KEYS}
+    extra = data.get("extra_meta_keys") or []
+    out["extra_meta_keys"] = [k for k in extra if isinstance(k, str) and k.strip()]
+    return out
+
+
+def meta_keys() -> list[str]:
+    """Primary key first, then extra keys (one parallel worker per key)."""
+    sec = secrets()
+    keys = []
+    for k in [sec["meta_api_key"], *sec["extra_meta_keys"]]:
+        if k and k not in keys:
+            keys.append(k)
+    return keys
 
 
 def save_secrets(values: dict) -> None:
@@ -136,7 +149,13 @@ def save_secrets(values: dict) -> None:
     with _lock:
         current = secrets()
         for key in SECRET_KEYS:
-            if values.get(key) is not None:
+            if values.get(key) is None:
+                continue
+            if key == "extra_meta_keys":
+                raw = values[key]
+                items = raw.splitlines() if isinstance(raw, str) else list(raw)
+                current[key] = [s.strip() for s in items if str(s).strip()]
+            else:
                 current[key] = str(values[key]).strip()
         path = _secrets_path()
         tmp = path.with_suffix(".tmp")
@@ -153,10 +172,12 @@ def save_secrets(values: dict) -> None:
 def public_settings() -> dict:
     s, sec = settings(), secrets()
     out = dict(s)
-    for key in SECRET_KEYS:
+    for key in ("meta_api_key", "archivist_password"):
         value = sec[key]
         out[f"{key}_set"] = bool(value)
         out[f"{key}_hint"] = f"…{value[-4:]}" if len(value) >= 8 else ("set" if value else "")
+    out["extra_meta_keys_count"] = len(sec["extra_meta_keys"])
+    out["extra_meta_keys_hints"] = [f"…{k[-4:]}" for k in sec["extra_meta_keys"]]
     return out
 
 
@@ -232,6 +253,16 @@ def enqueue_cart() -> list[int]:
                 ids.append(cur.lastrowid)
         c.execute("DELETE FROM cart")
     return ids
+
+
+def claim_next_job() -> dict | None:
+    """Atomically take the first queued part (parallel workers never collide)."""
+    with connect() as c:
+        row = c.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+        if not row:
+            return None
+        c.execute("UPDATE jobs SET status='running', updated_at=? WHERE id=? AND status='queued'", (now(), row["id"]))
+        return _job(c.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
 
 def update_job(job_id, **fields):

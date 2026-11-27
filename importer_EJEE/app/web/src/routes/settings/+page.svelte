@@ -9,7 +9,8 @@
 		ejee_db: '',
 		uploads: '',
 		meta_api_key: '',
-		archivist_password: ''
+		archivist_password: '',
+		extra_keys: ''
 	});
 	let busy = $state('');
 	let error = $state('');
@@ -27,6 +28,7 @@
 				server_url: saved.server_url,
 				ejee_db: saved.ejee_db,
 				uploads: saved.uploads,
+				extra_keys: '',
 				meta_api_key: '',
 				archivist_password: ''
 			};
@@ -40,13 +42,17 @@
 		busy = 'save';
 		error = '';
 		try {
-			const body = { ...form };
+			const { extra_keys, ...body } = form;
 			// Blank secret fields keep the saved value; "Clear" sends "".
 			if (!body.meta_api_key) body.meta_api_key = null;
 			if (!body.archivist_password) body.archivist_password = null;
+			// Typed extra keys replace the saved list; blank keeps it.
+			const lines = extra_keys.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+			body.extra_meta_keys = lines.length ? lines : null;
 			saved = await api.saveSettings(body);
 			form.meta_api_key = '';
 			form.archivist_password = '';
+			form.extra_keys = '';
 			toast('Settings saved.', 'ok');
 			await refreshStatus();
 			return true;
@@ -61,7 +67,7 @@
 	async function clearSecret(key) {
 		busy = 'save';
 		try {
-			saved = await api.saveSettings({ [key]: '' });
+			saved = await api.saveSettings({ [key]: key === 'extra_meta_keys' ? [] : '' });
 			toast('Removed.', 'ok');
 			refreshStatus();
 		} catch (err) {
@@ -81,7 +87,7 @@
 			let text;
 			if (!r.ok) text = r.detail;
 			else if (what === 'server') text = `Connected to ${r.url}; the archivist password works.`;
-			else if (what === 'meta') text = r.verified ? 'The model endpoint accepted the key.' : r.note;
+			else if (what === 'meta') text = r.note ?? (r.verified ? 'The model endpoint accepted the key.' : '');
 			else text = 'EJEE database and uploads found.';
 			tests = { ...tests, [what]: { ok: r.ok, text } };
 		} catch (err) {
@@ -165,10 +171,24 @@
 					<button type="button" class="pl-btn" onclick={() => (showKey = !showKey)} aria-pressed={showKey}>{showKey ? 'Hide' : 'Show'}</button>
 				</span>
 			</label>
+			<label class="pl-field">
+				Extra keys for parallel processing
+				<textarea rows="2" bind:value={form.extra_keys} autocomplete="off" spellcheck="false"
+					placeholder={saved.extra_meta_keys_count
+						? `${saved.extra_meta_keys_count} saved (${saved.extra_meta_keys_hints.join(', ')}) · type to replace all`
+						: 'Optional: one key per line, ideally from different accounts'}></textarea>
+				<span class="pl-hint">
+					Each key runs its own worker on the same queue, so 3 keys ≈ 3× faster. A rejected or rate-limited key
+					is set aside and the others continue.
+				</span>
+			</label>
 			<div class="row">
 				<button type="button" class="pl-btn" disabled={!!busy} onclick={() => test('meta')}>
-					{busy === 'test-meta' ? 'Testing…' : 'Save & test key'}
+					{busy === 'test-meta' ? 'Testing…' : 'Save & test keys'}
 				</button>
+				{#if saved.extra_meta_keys_count}
+					<button type="button" class="link" disabled={!!busy} onclick={() => clearSecret('extra_meta_keys')}>Forget extra keys</button>
+				{/if}
 				{#if saved.meta_api_key_set}
 					<button type="button" class="link" disabled={!!busy} onclick={() => clearSecret('meta_api_key')}>Forget key</button>
 				{/if}
