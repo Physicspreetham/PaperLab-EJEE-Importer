@@ -61,6 +61,21 @@ AUTO_BY = "EJEE Importer app (automatic, no human review)"
 AUTO_NOTE = "Direct publish: held items were not reviewed by a person."
 
 
+# Exit codes that mean "the OS stopped the child" (shutdown, logoff, Ctrl+C,
+# console closed), not "this part is bad": 0x40010004 DBG_TERMINATE_PROCESS,
+# 0xC000013A STATUS_CONTROL_C_EXIT, 0xC000026B DLL init failed during logoff,
+# 0xC0000142 DLL init failed; negative = POSIX signal.
+_KILLED = {0x40010004, 0xC000013A, 0xC000026B, 0xC0000142}
+
+
+class Interrupted(Exception):
+    """A phase was killed from outside; resume it later, do not fail the part."""
+
+
+def was_killed(rc: int) -> bool:
+    return rc < 0 or (rc & 0xFFFFFFFF) in _KILLED
+
+
 def classify_failure(text: str) -> str | None:
     """'meta' | 'rate' | 'network' for systemic model failures, else None."""
     if not text:
@@ -246,7 +261,15 @@ class Pipeline:
                 store.update_job(job["id"], status="queued", stage=stage)
                 return
             store.update_job(job["id"], stage=stage)
-            outcome = self._stage(job, stage, run, cfg_path, log_path, env, settings, secrets)
+            try:
+                outcome = self._stage(job, stage, run, cfg_path, log_path, env, settings, secrets)
+            except Interrupted as exc:
+                # Shutdown/logoff/sleep killed the child: keep the part queued at
+                # this step and pause, so the rest of the queue is not burned.
+                self._pause_queue(job, stage, "restart",
+                                  f"Paused: {exc}. Resume continues at this step; finished work is kept.")
+                store.update_job(job["id"], usd=round(cost(run), 6))
+                return
             store.update_job(job["id"], usd=round(cost(run), 6))
             if outcome is not True:
                 return  # the stage already recorded the job/queue state
@@ -257,7 +280,10 @@ class Pipeline:
     def _phase(self, phase, cfg_path, log_path, env, args=()):
         def keep(proc):
             self.proc = proc
-        return self.runner(phase, cfg_path, log_path, env, args, keep)
+        rc, out = self.runner(phase, cfg_path, log_path, env, args, keep)
+        if was_killed(rc):
+            raise Interrupted(f"{phase} was stopped by the system (exit {rc & 0xFFFFFFFF:#x})")
+        return rc, out
 
     def _stage(self, job, stage, run, cfg_path, log_path, env, settings, secrets):
         if stage == "prepare":

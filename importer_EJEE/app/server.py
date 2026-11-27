@@ -98,13 +98,16 @@ def _autoresume_loop():
     drop, resume the queue once the free server/key checks pass again."""
     worker.stop_flag.wait(20)  # give a co-started PaperLab time to come up
     while not worker.stop_flag.is_set():
-        q = store.queue_state()
-        if q["paused"] and q["kind"] in AUTO_RESUME_KINDS and any(j["status"] == "queued" for j in store.jobs()):
-            try:
+        try:
+            q = store.queue_state()
+            if q["paused"] and q["kind"] in AUTO_RESUME_KINDS and any(j["status"] == "queued" for j in store.jobs()):
                 _preflight()
                 worker.resume()
-            except HTTPException:
-                pass  # still offline; try again later
+                print(f"{store.now()} auto-resume: queue resumed (was: {q['kind']})", flush=True)
+        except HTTPException as exc:
+            print(f"{store.now()} auto-resume: not yet ({exc.detail})", flush=True)  # still offline
+        except Exception as exc:  # never let the unattended loop die
+            print(f"{store.now()} auto-resume: error {type(exc).__name__}: {exc}", flush=True)
         worker.stop_flag.wait(120)
 
 

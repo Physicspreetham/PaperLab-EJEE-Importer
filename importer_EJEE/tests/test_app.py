@@ -377,6 +377,23 @@ def test_bundles_are_copied_off_machine_and_books_queue_in_added_order(env, monk
     assert [store.job(i)["source"] for i in new] == ["Zeta Book", "Alpha Book"]
 
 
+def test_os_kill_pauses_instead_of_failing_the_part(env):
+    import pipeline
+    import store
+    job_id = _job(env)
+    runner = Recorder()
+    runner.fail["prepare"] = [(0xC000026B, "")]  # Windows logoff/shutdown killed the child
+    worker = pipeline.Pipeline(runner=runner, publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    worker.process(store.job(job_id))
+    job, q = store.job(job_id), store.queue_state()
+    assert job["status"] == "queued" and job["stage"] == "prepare" and q["paused"] and q["kind"] == "restart"
+    assert pipeline.was_killed(-15) and not pipeline.was_killed(2) and not pipeline.was_killed(1)
+    store.set_queue(False)
+    worker.process(store.job(job_id))
+    assert store.job(job_id)["status"] == "done"
+
+
 def test_interrupted_job_is_requeued_paused_on_restart(env):
     import store
     job_id = _job(env)
