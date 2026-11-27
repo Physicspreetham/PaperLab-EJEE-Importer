@@ -80,6 +80,14 @@ http://127.0.0.1:5174/.
 3. **Settings → Meta API**: your key. **Save & test key** asks the model
    endpoint's free `/models` listing; a rejected key is reported at once.
 
+**Faster with more keys.** Settings → Meta API → *Extra keys for parallel
+processing* takes more keys (one per line, ideally from different accounts).
+Each key runs its own worker on the same ordered queue, so three keys are
+roughly three times faster. A rejected key is set aside until you press
+Resume; a rate-limited one is retried after 15 minutes; the others keep
+going. PaperLab accepts one upload at a time, so parallel uploads wait
+their turn instead of pausing the queue.
+
 Search, books and cart work without the key or the server. **Processing
 stays locked until all five settings are set**, and Start/Resume first
 re-check the server login and the key, both without cost, so a wrong
