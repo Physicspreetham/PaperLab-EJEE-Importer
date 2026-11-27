@@ -122,12 +122,37 @@ def model_base_url() -> str:
 
 
 # --------------------------------------------------------------------- plans
+def answered_only(source: str) -> bool:
+    """Hibbeler, Savchenko and Meriam process only questions with a key or a worked solution."""
+    from ejee_index import in_answered_only
+    return in_answered_only(source)
+
+
 def ensure_plan(source: str, slug: str, ejee_db: str, uploads: str) -> dict:
-    """Freeze (or load) the book plan, exactly as run_book.py does."""
+    """Freeze (or load) the book plan, exactly as run_book.py does.
+
+    Answered-only books always re-freeze from EJEE answered rows, so a stale
+    full plan can never leak question-only items into the queue again.
+    """
     import book_plan
     from importer import source_connect
     book_dir = ROOT / store.runs_rel() / slug
     plan_path = book_dir / "plan.json"
+    if answered_only(source):
+        with closing(source_connect(ejee_db)) as conn:
+            items, _ignored = book_plan.load_book(conn, source, uploads)
+        ok = [it for it in items if it["solution_ids"] or it["has_key"]]
+        parts = [[it["key"] for it in chunk] for chunk in book_plan.cut_parts(ok, 15)]
+        if plan_path.exists():
+            old = json.loads(plan_path.read_text(encoding="utf-8"))
+            if old.get("source") == source and old.get("parts") == parts:
+                return old
+        plan = {"schema": book_plan.PLAN_SCHEMA, "source": source, "part_size": 15,
+                "parts": parts, "items": {it["key"]: it for it in items},
+                "_trim": {"from_part": 1, "policy": "answered items only (key or worked solution)"}}
+        book_dir.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(json.dumps(plan, indent=1, ensure_ascii=False), encoding="utf-8")
+        return plan
     if not plan_path.exists():
         with closing(source_connect(ejee_db)) as conn:
             summary = book_plan.plan_book(conn, source, uploads, 15, book_dir)
