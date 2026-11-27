@@ -185,8 +185,12 @@ def build(db_path, uploads, part_size=PART_SIZE):
                             membership[key] = (p, i)
             except (OSError, ValueError, KeyError):
                 membership = {}
+        if not planned and source in ANSWERED_ONLY and plan_file.is_file():
+            membership, planned = {}, 0  # force a re-freeze on answered items only
         if not planned:
-            for p, part in enumerate(book_plan.cut_parts(items, part_size), 1):
+            answered = [it for it in items if it["solution_ids"] or it["has_key"]] \
+                if source in ANSWERED_ONLY else items
+            for p, part in enumerate(book_plan.cut_parts(answered, part_size), 1):
                 for i, it in enumerate(part, 1):
                     membership[it["key"]] = (p, i)
         cats = Counter()
@@ -436,6 +440,12 @@ def source_by_slug(slug: str) -> dict | None:
     with connect_index() as c:
         r = c.execute("SELECT * FROM sources WHERE slug=?", (slug,)).fetchone()
     return dict(r) if r else None
+
+
+# Books where question-only items are not convertible: parts contain only
+# questions with a key or a worked solution (ATOMIC_WRITE keeps done parts).
+ANSWERED_ONLY = ("Hibbeler Dynamics 14e", "Savchenko · Problems in Physics",
+                 "Meriam & Kraige Dynamics 7e")
 
 
 def part_info(slug: str, part: int) -> dict | None:

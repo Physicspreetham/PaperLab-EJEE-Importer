@@ -271,6 +271,7 @@ def cart_add(body: CartAdd):
                                  "The index was updated; search again and re-add the part.")
     if not info["planned"]:
         ejee_index.refresh_planned(info["source"], body.slug, plan)
+        _freeze_plan_file(body.slug, plan)
     try:
         store.cart_add(body.slug, info["source"], body.part, info["questions"])
     except ValueError as exc:
@@ -288,6 +289,15 @@ def books(body: BooksQuery):
     _index_ready()
     return {"books": ejee_index.books(body.q, body.category, store.part_statuses()),
             "categories": ejee_index.CATEGORIES}
+
+
+def _freeze_plan_file(slug: str, plan: dict):
+    """Write the frozen plan the index used (plan/plan.json) for reproducibility."""
+    import json as _json
+    path = (store.ROOT / store.runs_rel() / slug / "plan.json")
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(plan, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
 def parse_parts(text: str, total: int) -> list[int]:
@@ -327,6 +337,7 @@ def book_to_cart(body: BookConvert):
     except Exception as exc:
         raise HTTPException(409, f"Could not plan {src['source']}: {exc}")
     ejee_index.refresh_planned(src["source"], body.slug, plan)
+    _freeze_plan_file(body.slug, plan)
     taken = store.part_statuses()
     added, skipped = [], []
     for part in parse_parts(body.parts, len(plan["parts"])):
