@@ -177,19 +177,26 @@ def build(db_path, uploads, part_size=PART_SIZE):
         planned = 0
         if plan_file.is_file():
             try:
-                plan = json.loads(plan_file.read_text(encoding="utf-8"))
-                if plan.get("source") == source:
-                    planned = 1
-                    for p, keys in enumerate(plan["parts"], 1):
-                        for i, key in enumerate(keys, 1):
-                            membership[key] = (p, i)
+                cand = json.loads(plan_file.read_text(encoding="utf-8"))
+                if cand.get("source") == source:
+                    if in_answered_only(source):
+                        stale = [k for part in cand["parts"] for k in part if not (
+                            cand["items"][k]["solution_ids"] or cand["items"][k]["has_key"])]
+                        if not stale:
+                            planned = 1
+                            for p, keys in enumerate(cand["parts"], 1):
+                                for i, key in enumerate(keys, 1):
+                                    membership[key] = (p, i)
+                    else:
+                        planned = 1
+                        for p, keys in enumerate(cand["parts"], 1):
+                            for i, key in enumerate(keys, 1):
+                                membership[key] = (p, i)
             except (OSError, ValueError, KeyError):
-                membership = {}
-        if not planned and source in ANSWERED_ONLY and plan_file.is_file():
-            membership, planned = {}, 0  # force a re-freeze on answered items only
+                membership, planned = {}, 0
         if not planned:
             answered = [it for it in items if it["solution_ids"] or it["has_key"]] \
-                if source in ANSWERED_ONLY else items
+                if in_answered_only(source) else items
             for p, part in enumerate(book_plan.cut_parts(answered, part_size), 1):
                 for i, it in enumerate(part, 1):
                     membership[it["key"]] = (p, i)
@@ -444,6 +451,18 @@ def source_by_slug(slug: str) -> dict | None:
 
 # Books where question-only items are not convertible: parts contain only
 # questions with a key or a worked solution (ATOMIC_WRITE keeps done parts).
+ANSWERED_ONLY_SOURCES = ("Hibbeler Dynamics 14e", "Savchenko · Problems in Physics",
+                            "Meriam & Kraige Dynamics 7e")
+
+
+def in_answered_only(source: str) -> bool:
+    """Hibbeler/Savchenko/Meriam exact names, plus every SBT source."""
+    if source in ANSWERED_ONLY_SOURCES:
+        return True
+    low = (source or "").lower()
+    return low == "sbtv1" or low.startswith("sbt ") or low.startswith("sbt-") or " sbt " in f" {low} "
+
+
 ANSWERED_ONLY = ("Hibbeler Dynamics 14e", "Savchenko · Problems in Physics",
                  "Meriam & Kraige Dynamics 7e")
 
