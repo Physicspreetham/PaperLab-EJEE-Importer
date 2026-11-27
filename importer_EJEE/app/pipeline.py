@@ -250,7 +250,8 @@ class Pipeline:
         store.update_job(job["id"], status="queued", stage=stage, error=message, error_kind=kind)
         # A rejected or rate-limited key only benches this worker while other
         # keys are still working; the last working key pauses the whole queue.
-        if kind in ("meta", "rate") and self.pool and self.pool.active_count() > 1:
+        # (No pool = old single-worker behaviour: always pause the queue.)
+        if kind in ("meta", "rate") and self.pool is not None and self.pool.active_count() > 1:
             import time
             self.parked = f"key {self.slot + 1}: {message}"
             self.parked_kind, self.parked_at = kind, time.time()
@@ -277,6 +278,14 @@ class Pipeline:
         for stage in STAGES:
             if stage in done:
                 continue
+            if not self._manifest_matches_plan(job, run, cfg_path):
+                import shutil  # stale run from a re-planned book: rebuild it cleanly
+                store.update_job(job["id"], done=[], stage="prepare")
+                shutil.rmtree(run, ignore_errors=True)
+                run.mkdir(parents=True, exist_ok=True)
+                cfg_path = write_config(job, settings["ejee_db"], settings["uploads"])
+                done = []
+                stage = "prepare"
             if store.queue_state()["paused"]:
                 store.update_job(job["id"], status="queued", stage=stage)
                 return
@@ -305,10 +314,30 @@ class Pipeline:
             raise Interrupted(f"{phase} was stopped by the system (exit {rc & 0xFFFFFFFF:#x})")
         return rc, out
 
+    def _manifest_matches_plan(self, job, run, cfg_path) -> bool:
+        """The frozen plan changed (answered-only re-plan): restart the run cleanly."""
+        manifest = _read_json(run / "manifest.json")
+        if not manifest.get("items"):
+            return True  # nothing prepared yet: not stale, just new
+        try:
+            plan = ensure_plan(job["source"], job["slug"], store.settings()["ejee_db"],
+                               store.settings()["uploads"])
+        except Exception:
+            return True  # unknown: don't delete blindly, let prepare fail loudly
+        try:
+            want = plan["parts"][int(job["part"]) - 1]
+        except (IndexError, KeyError, TypeError):
+            return True
+        return [it.get("plan_key") or it.get("key") for it in (manifest.get("items") or [])] == want
+
+    @staticmethod
+    def _abstained(run, number) -> bool:
+        """Node 3 answered 'no topic' for this question (not an error)."""
+        from importer import is_abstention
+        return is_abstention((_read_json(run / "progress.json").get("node3") or {}).get(number) or {})
+
     def _stage(self, job, stage, run, cfg_path, log_path, env, settings, secrets):
         if stage == "prepare":
-            if (run / "manifest.json").exists():
-                return True
             rc, out = self._phase("prepare", cfg_path, log_path, env)
             if rc:
                 store.update_job(job["id"], status="failed", error_kind="content",
@@ -329,7 +358,7 @@ class Pipeline:
                 if attempt == 1:
                     continue  # one automatic retry of just the unfinished questions
             failed = _failed_questions(run, stage)
-            if stage == "classify" and failed and all(_abstained(run, n) for n in failed):
+            if stage == "classify" and failed and all(self._abstained(run, n) for n in failed):
                 current = store.job(job["id"])["detail"] or {}
                 store.update_job(job["id"], detail={**current, "untagged": failed})
                 return True  # published untagged -> PaperLab's Tagging Inbox
@@ -522,12 +551,6 @@ def copy_bundle(job: dict, bundle: Path) -> None:
     except OSError as exc:
         current = store.job(job["id"])["detail"] or {}
         store.update_job(job["id"], detail={**current, "copy_error": f"{dest}: {exc}"})
-
-
-def _abstained(run, number) -> bool:
-    """Node 3 answered 'no topic' for this question (not an error)."""
-    from importer import is_abstention
-    return is_abstention((_read_json(run / "progress.json").get("node3") or {}).get(number) or {})
 
 
 def _verify_errors(run) -> list[str]:
