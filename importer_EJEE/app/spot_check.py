@@ -68,7 +68,7 @@ def check_question(qdir: Path) -> list[str]:
         problems.append(f"question text very short ({len(q)} chars)")
     if not (qdir / "solution.tex").is_file():
         problems.append("solution.tex missing")
-    elif "no_solution_found" not in s and "No worked solution" not in s and not re.search(r"Answer", s):
+    elif not re.search(r"Answer|no_solution_found|No worked solution|No solution provided", s):
         problems.append("no answer line in solution.tex")
     for name, tex in (("question", q), ("solution", s)):
         problems += [f"{name}.tex: {e}" for e in syntax_errors(tex)[:5]]
