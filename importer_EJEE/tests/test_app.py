@@ -358,6 +358,36 @@ def test_tagging_abstention_publishes_untagged_but_errors_still_fail(env):
     assert not is_abstention({"ok": False, "errors": ["parse failed"], "raw_reply": "garbage"})
 
 
+def test_stale_run_is_rebuilt_from_prepare_after_replan(env):
+    """A re-planned book restarts the stale run folder at prepare, not mid-pipeline."""
+    import pipeline
+    import store
+    job_id = _job(env)
+    runner = Recorder()
+    worker = pipeline.Pipeline(runner=runner, publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    worker.process(store.job(job_id))
+    assert store.job(job_id)["status"] == "done"
+    phases = [c for c in runner.calls]
+    assert phases.count("prepare") == 1 and phases.count("extract") == 1
+    # Now the "plan" changes: stale manifest must trigger a clean rebuild, exactly once.
+    second = pipeline.Pipeline(runner=runner, publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    job = store.job(job_id)
+    store.update_job(job_id, status="queued", done=["prepare"])
+    orig = pipeline.Pipeline._manifest_matches_plan
+    pipeline.Pipeline._manifest_matches_plan = lambda self, j, r, c: False
+    try:
+        second.process(store.job(job_id))
+        calls = runner.calls
+        # rebuild from the top: a fresh full pass [prepare..export] after the old one.
+        # Bug shape would be an extract BEFORE the second prepare (mid-pipeline resume).
+        first_old, first_new = calls.index("prepare"), calls.index("prepare", 1)
+        assert calls[first_new - 1] == "export" and calls[first_new + 1] == "extract", calls
+    finally:
+        pipeline.Pipeline._manifest_matches_plan = orig
+
+
 def test_bundles_are_copied_off_machine_and_books_queue_in_added_order(env, monkeypatch):
     import pipeline
     import store

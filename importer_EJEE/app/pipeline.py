@@ -275,17 +275,16 @@ class Pipeline:
         log_path = run.parent / f"part-{job['part']:03d}.log"
         env = child_env(self.key() or secrets["meta_api_key"])
 
+        if not self._manifest_matches_plan(job, run, cfg_path):
+            import shutil  # stale run from a re-planned book: rebuild it cleanly, once
+            store.update_job(job["id"], done=[], stage="prepare")
+            shutil.rmtree(run, ignore_errors=True)
+            run.mkdir(parents=True, exist_ok=True)
+            cfg_path = write_config(job, settings["ejee_db"], settings["uploads"])
+            done = []
         for stage in STAGES:
             if stage in done:
-                continue
-            if not self._manifest_matches_plan(job, run, cfg_path):
-                import shutil  # stale run from a re-planned book: rebuild it cleanly
-                store.update_job(job["id"], done=[], stage="prepare")
-                shutil.rmtree(run, ignore_errors=True)
-                run.mkdir(parents=True, exist_ok=True)
-                cfg_path = write_config(job, settings["ejee_db"], settings["uploads"])
-                done = []
-                stage = "prepare"
+                continue  # finished stage, manifest still current
             if store.queue_state()["paused"]:
                 store.update_job(job["id"], status="queued", stage=stage)
                 return
