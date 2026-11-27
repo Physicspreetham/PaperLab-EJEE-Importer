@@ -131,22 +131,31 @@ def answered_only(source: str) -> bool:
 def ensure_plan(source: str, slug: str, ejee_db: str, uploads: str) -> dict:
     """Freeze (or load) the book plan, exactly as run_book.py does.
 
-    Answered-only books always re-freeze from EJEE answered rows, so a stale
-    full plan can never leak question-only items into the queue again.
+    Answered-only books: a plan already trimmed (``_trim``) is frozen and loaded
+    as-is -- its earlier parts may be published, so it is never re-cut. An
+    untrimmed plan is re-frozen answered-only only while nothing of the book has
+    started; otherwise this refuses (re-cutting would renumber published parts).
     """
     import book_plan
     from importer import source_connect
     book_dir = ROOT / store.runs_rel() / slug
     plan_path = book_dir / "plan.json"
     if answered_only(source):
+        old = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
+        if old is not None:
+            if old.get("source") != source:
+                raise ValueError(f"{plan_path} belongs to another source ({old.get('source')!r}).")
+            if old.get("_trim"):
+                return old
+            if store.book_started(slug):
+                raise ValueError(f"{source!r} has an untrimmed plan and parts already started; "
+                                 "trim it from the first unstarted part (scripts/trim_answered.py).")
         with closing(source_connect(ejee_db)) as conn:
             items, _ignored = book_plan.load_book(conn, source, uploads)
         ok = [it for it in items if it["solution_ids"] or it["has_key"]]
+        if not ok:
+            raise ValueError(f"No answered questions in {source!r}.")
         parts = [[it["key"] for it in chunk] for chunk in book_plan.cut_parts(ok, 15)]
-        if plan_path.exists():
-            old = json.loads(plan_path.read_text(encoding="utf-8"))
-            if old.get("source") == source and old.get("parts") == parts:
-                return old
         plan = {"schema": book_plan.PLAN_SCHEMA, "source": source, "part_size": 15,
                 "parts": parts, "items": {it["key"]: it for it in items},
                 "_trim": {"from_part": 1, "policy": "answered items only (key or worked solution)"}}

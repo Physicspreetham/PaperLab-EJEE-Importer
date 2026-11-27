@@ -235,6 +235,14 @@ def jobs() -> list[dict]:
         return [_job(r) for r in c.execute("SELECT * FROM jobs ORDER BY id")]
 
 
+def book_started(slug) -> bool:
+    """True once any part of the book has run (its plan may be published from)."""
+    with connect() as c:
+        row = c.execute("SELECT 1 FROM jobs WHERE slug=? AND (status IN ('done','running','failed') "
+                        "OR done != '[]') LIMIT 1", (slug,)).fetchone()
+    return row is not None
+
+
 def job(job_id) -> dict | None:
     with connect() as c:
         row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()

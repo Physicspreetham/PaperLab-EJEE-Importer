@@ -199,6 +199,30 @@ def _job(env):
     return job_id
 
 
+def test_answered_only_trimmed_plan_is_never_recut(env, monkeypatch):
+    """A trimmed plan's published parts must keep their numbering (no re-cut from part 1)."""
+    import json as _json
+    import pipeline
+    import store
+    job_id = _job(env)
+    job = store.job(job_id)
+    monkeypatch.setattr(pipeline, "answered_only", lambda source: True)
+    book = env["runs"] / job["slug"]
+    book.mkdir(parents=True, exist_ok=True)
+    frozen = {"schema": 1, "source": job["source"], "part_size": 15, "parts": [["a"], ["b"]],
+              "items": {}, "_trim": {"from_part": 2, "policy": "answered"}}
+    (book / "plan.json").write_text(_json.dumps(frozen), encoding="utf-8")
+    plan = pipeline.ensure_plan(job["source"], job["slug"], str(env["db"]), str(env["uploads"]))
+    assert plan["parts"] == [["a"], ["b"]]
+    assert _json.loads((book / "plan.json").read_text(encoding="utf-8")) == frozen
+    # untrimmed plan of a started book: refuse rather than renumber published parts
+    del frozen["_trim"]
+    (book / "plan.json").write_text(_json.dumps(frozen), encoding="utf-8")
+    store.update_job(job_id, status="done")
+    with pytest.raises(ValueError, match="already started"):
+        pipeline.ensure_plan(job["source"], job["slug"], str(env["db"]), str(env["uploads"]))
+
+
 class Recorder:
     """Stub importer phases: write the files the real ones would, on demand."""
 
