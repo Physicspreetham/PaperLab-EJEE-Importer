@@ -105,7 +105,7 @@ def screenshot(url: str, out: Path, exe: str | None) -> bool:
 def run_check(out_root: Path, per_check: int, viewer: str, interval: int) -> Path:
     out_root.mkdir(parents=True, exist_ok=True)
     state_file = out_root / "state.json"
-    state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {"checked_jobs": [],
+    state = json.loads(state_file.read_text(encoding="utf-8-sig")) if state_file.is_file() else {"checked_jobs": [],
                                                                                                "done_count": None}
     jobs = store.jobs()
     done = [j for j in jobs if j["status"] == "done" and j["receipt"]]
