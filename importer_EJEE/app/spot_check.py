@@ -116,9 +116,11 @@ def run_check(out_root: Path, per_check: int, viewer: str, interval: int) -> Pat
     q = store.queue_state()
     counts = {s: sum(1 for j in jobs if j["status"] == s) for s in ("done", "running", "queued", "failed")}
     alerts = []
+    elapsed = time.time() - state.get("checked_at", time.time())
     if state["done_count"] is not None and counts["done"] == state["done_count"] and not q["paused"] \
-            and counts["queued"]:
-        alerts.append(f"STALL: no part finished in the last {interval // 60} min while the queue was running")
+            and counts["queued"] and elapsed >= 0.9 * interval:
+        alerts.append(f"STALL: no part finished in the last {int(elapsed // 60)} min while the queue was running")
+    state["checked_at"] = time.time()
     if q["paused"]:
         alerts.append(f"Queue paused ({q['kind']}): {q['reason']}")
     for j in jobs:
