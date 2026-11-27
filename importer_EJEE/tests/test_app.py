@@ -223,6 +223,44 @@ def test_answered_only_trimmed_plan_is_never_recut(env, monkeypatch):
         pipeline.ensure_plan(job["source"], job["slug"], str(env["db"]), str(env["uploads"]))
 
 
+def test_silent_phase_is_killed_by_stall_guard(tmp_path, monkeypatch):
+    """A child that hangs (e.g. a model request with no timeout) is killed, not waited on forever."""
+    import os
+    import time as _time
+    import pipeline
+    hang = tmp_path / "hang.py"
+    hang.write_text("import time\nprint('Extracting 1', flush=True)\ntime.sleep(120)\n", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "IMPORTER", hang)
+    monkeypatch.setenv("EJEE_APP_STALL_SEC", "1")
+    log = tmp_path / "part.log"
+    t0 = _time.monotonic()
+    rc, _ = pipeline.default_runner("extract", tmp_path / "cfg.json", log, dict(os.environ))
+    assert rc == pipeline.STALLED_RC
+    assert _time.monotonic() - t0 < 30
+    assert "stall guard" in log.read_text(encoding="utf-8")
+
+
+def test_stalled_part_requeues_then_fails_without_pausing_queue(env):
+    import pipeline
+    import store
+    job_id = _job(env)
+
+    def runner(phase, cfg, log, e, args=(), on_proc=None):
+        if phase == "prepare":
+            Recorder()(phase, cfg, log, e, args, on_proc)
+            return 0, ""
+        return pipeline.STALLED_RC, ""
+
+    worker = pipeline.Pipeline(runner=runner, publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    for expected in ("queued", "queued", "failed"):
+        worker.process(store.job(job_id))
+        job = store.job(job_id)
+        assert job["status"] == expected, job
+        assert not store.queue_state()["paused"]
+    assert job["detail"] == {"stalls": 3} and job["error_kind"] == "network"
+
+
 class Recorder:
     """Stub importer phases: write the files the real ones would, on demand."""
 

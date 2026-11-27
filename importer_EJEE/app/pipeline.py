@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
@@ -70,6 +71,18 @@ _KILLED = {0x40010004, 0xC000013A, 0xC000026B, 0xC0000142}
 
 class Interrupted(Exception):
     """A phase was killed from outside; resume it later, do not fail the part."""
+
+
+class Stalled(Exception):
+    """A phase printed nothing for STALL_SEC (e.g. a model request that never returns)."""
+
+
+STALLED_RC = 0x5A11ED  # our own exit marker for a phase killed by the silence guard
+MAX_STALLS = 3
+
+
+def stall_sec() -> float:
+    return float(os.environ.get("EJEE_APP_STALL_SEC", 1200))
 
 
 def was_killed(rc: int) -> bool:
@@ -198,11 +211,29 @@ def default_runner(phase: str, cfg_path: Path, log_path: Path, env: dict, args=(
                                 text=True, encoding="utf-8", errors="replace")
         if on_proc:
             on_proc(proc)
+        last = [time.monotonic()]
+        stalled = threading.Event()
+        finished = threading.Event()
+        limit = stall_sec()
+
+        def guard():  # kill a child that has gone silent (hung request, no timeout)
+            while not finished.wait(5):
+                if time.monotonic() - last[0] > limit:
+                    stalled.set()
+                    proc.kill()
+                    return
+
+        threading.Thread(target=guard, name=f"stall-guard-{phase}", daemon=True).start()
         for line in proc.stdout:
+            last[0] = time.monotonic()
             log.write(line)
             log.flush()
             tail.append(line.rstrip("\n"))
         rc = proc.wait()
+        finished.set()
+        if stalled.is_set():
+            log.write(f"===== {phase} killed: no output for {limit:.0f}s (stall guard)\n")
+            return STALLED_RC, "\n".join(tail)
         log.write(f"===== {phase} exit {rc}\n")
     return rc, "\n".join(tail)
 
@@ -295,7 +326,9 @@ class Pipeline:
     def process(self, job):
         settings, secrets = store.settings(), store.secrets()
         self.current = job["id"]
-        store.update_job(job["id"], status="running", error=None, error_kind=None, detail=None,
+        prev = job.get("detail") if isinstance(job.get("detail"), dict) else {}
+        keep = {"stalls": prev["stalls"]} if prev.get("stalls") else None  # survives re-pickup
+        store.update_job(job["id"], status="running", error=None, error_kind=None, detail=keep,
                          attempts=job["attempts"] + 1)
         done = list(job["done"])
         run = run_dir(job["slug"], job["part"])
@@ -332,6 +365,19 @@ class Pipeline:
                                   f"Paused: {exc}. Resume continues at this step; finished work is kept.")
                 store.update_job(job["id"], usd=round(cost(run), 6))
                 return
+            except Stalled as exc:
+                # One hung child: retry just this part (finished questions are kept);
+                # the rest of the queue keeps running. Give up after MAX_STALLS.
+                detail = store.job(job["id"]).get("detail") or {}
+                stalls = int(detail.get("stalls", 0)) + 1 if isinstance(detail, dict) else 1
+                if stalls >= MAX_STALLS:
+                    store.update_job(job["id"], status="failed", stage=stage, error_kind="network",
+                                     error=f"{exc} ({stalls} times); retry it later.", detail={"stalls": stalls},
+                                     usd=round(cost(run), 6))
+                else:
+                    store.update_job(job["id"], status="queued", stage=stage, error=str(exc),
+                                     detail={"stalls": stalls}, usd=round(cost(run), 6))
+                return
             store.update_job(job["id"], usd=round(cost(run), 6))
             if outcome is not True:
                 return  # the stage already recorded the job/queue state
@@ -343,6 +389,8 @@ class Pipeline:
         def keep(proc):
             self.proc = proc
         rc, out = self.runner(phase, cfg_path, log_path, env, args, keep)
+        if rc == STALLED_RC:
+            raise Stalled(f"{phase} went silent for {stall_sec():.0f}s and was restarted")
         if was_killed(rc):
             raise Interrupted(f"{phase} was stopped by the system (exit {rc & 0xFFFFFFFF:#x})")
         return rc, out
