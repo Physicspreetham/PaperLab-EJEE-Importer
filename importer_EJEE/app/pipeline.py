@@ -77,6 +77,7 @@ class Stalled(Exception):
     """A phase printed nothing for STALL_SEC (e.g. a model request that never returns)."""
 
 
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024  # PaperLab POST /api/bundles/import body limit (backend/routers/bundles.py)
 STALLED_RC = 0x5A11ED  # our own exit marker for a phase killed by the silence guard
 MAX_STALLS = 3
 
@@ -508,6 +509,12 @@ class Pipeline:
                 done = [s for s in current["done"] if s not in ("export", "upload")]
                 store.update_job(job["id"], done=done, status="queued", stage="export",
                                  error="The exported bundle changed or disappeared; exporting again.")
+                return False
+            size = bundle.stat().st_size
+            if size > MAX_UPLOAD_BYTES:  # PaperLab drops bigger bodies mid-send (looks like a network error)
+                store.update_job(job["id"], status="failed", error_kind="content",
+                                 error=f"Bundle is {size / 1e6:.1f} MB, over PaperLab's {MAX_UPLOAD_BYTES >> 20} MB "
+                                       "upload limit. Kept on disk, not sent.")
                 return False
             try:
                 receipt = self.publisher(settings["server_url"], secrets["archivist_password"], bundle)

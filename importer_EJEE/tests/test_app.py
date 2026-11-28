@@ -486,6 +486,20 @@ def test_os_kill_pauses_instead_of_failing_the_part(env):
     assert store.job(job_id)["status"] == "done"
 
 
+def test_oversize_bundle_fails_its_part_without_pausing_queue(env, monkeypatch):
+    import pipeline
+    import store
+    job_id = _job(env)
+    monkeypatch.setattr(pipeline, "MAX_UPLOAD_BYTES", 1)
+    sent = []
+    worker = pipeline.Pipeline(runner=Recorder(), publisher=lambda *a: sent.append(a) or {"papers": []})
+    store.set_queue(False)
+    worker.process(store.job(job_id))
+    job = store.job(job_id)
+    assert job["status"] == "failed" and job["error_kind"] == "content" and "upload limit" in job["error"]
+    assert not sent and not store.queue_state()["paused"]
+
+
 def test_two_workers_per_key_and_claims_never_double_up(env, monkeypatch):
     import threading as _th
     import pipeline
