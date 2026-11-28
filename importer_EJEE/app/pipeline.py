@@ -422,6 +422,8 @@ class Pipeline:
 
     def _stage(self, job, stage, run, cfg_path, log_path, env, settings, secrets):
         if stage == "prepare":
+            if _read_json(run / "manifest.json").get("items") and self._manifest_matches_plan(job, run, cfg_path):
+                return True  # prepared just before a restart (not yet recorded): keep it, go on
             rc, out = self._phase("prepare", cfg_path, log_path, env)
             if rc:
                 store.update_job(job["id"], status="failed", error_kind="content",

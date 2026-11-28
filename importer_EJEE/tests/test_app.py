@@ -486,6 +486,26 @@ def test_os_kill_pauses_instead_of_failing_the_part(env):
     assert store.job(job_id)["status"] == "done"
 
 
+def test_prepared_run_not_yet_recorded_is_resumed_not_failed(env, monkeypatch):
+    """Restart right after prepare: the run is kept and the part continues (no 'already prepared' failure)."""
+    import pipeline
+    import store
+    monkeypatch.setattr(pipeline.Pipeline, "_manifest_matches_plan", lambda self, j, r, c: True)
+    job_id = _job(env)
+    runner = Recorder()
+    worker = pipeline.Pipeline(runner=runner, publisher=lambda *a: {"papers": []})
+    store.set_queue(False)
+    worker.process(store.job(job_id))
+    assert store.job(job_id)["status"] == "done"
+    run = pipeline.run_dir(store.job(job_id)["slug"], store.job(job_id)["part"])
+    (run / "manifest.json").write_text(json.dumps({"paper_name": "Test Book — Part 1",
+                                                   "items": [{"plan_key": "q1", "number": "1"}]}))
+    store.update_job(job_id, status="queued", done=[], stage="prepare")  # 'done' lost by the restart
+    runner.calls.clear()
+    worker.process(store.job(job_id))
+    assert "prepare" not in runner.calls and store.job(job_id)["status"] == "done", runner.calls
+
+
 def test_oversize_bundle_fails_its_part_without_pausing_queue(env, monkeypatch):
     import pipeline
     import store
