@@ -209,7 +209,8 @@ def default_runner(phase: str, cfg_path: Path, log_path: Path, env: dict, args=(
         log.flush()
         proc = subprocess.Popen([sys.executable, str(IMPORTER), phase, "--config", str(cfg_path), *args],
                                 cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding="utf-8", errors="replace")
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # no console pop-ups (Windows)
         if on_proc:
             on_proc(proc)
         last = [time.monotonic()]

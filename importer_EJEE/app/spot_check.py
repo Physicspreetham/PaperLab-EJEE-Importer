@@ -96,7 +96,8 @@ def screenshot(url: str, out: Path, exe: str | None) -> bool:
     try:
         subprocess.run([exe, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                         f"--user-data-dir={profile}", "--window-size=1100,1500", "--virtual-time-budget=12000",
-                        f"--screenshot={out}", url], capture_output=True, timeout=90)
+                        f"--screenshot={out}", url], capture_output=True, timeout=90,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         return False
     return out.is_file() and out.stat().st_size > 5000
