@@ -486,6 +486,35 @@ def test_os_kill_pauses_instead_of_failing_the_part(env):
     assert store.job(job_id)["status"] == "done"
 
 
+def test_two_workers_per_key_and_claims_never_double_up(env, monkeypatch):
+    import threading as _th
+    import pipeline
+    import store
+    _job(env)
+    store.cart_add(store.jobs()[0]["slug"], "Test Book", 2, 2)
+    store.enqueue_cart()
+    store.save_secrets({"extra_meta_keys": ["key-b-1111"]})
+    monkeypatch.setenv("EJEE_APP_WORKERS_PER_KEY", "2")
+    pool = pipeline.Pool(runner=Recorder(), publisher=lambda *a: {"papers": []})
+    with pool._lock:  # build workers without starting threads
+        for s in range(len(store.meta_keys()) * pipeline.workers_per_key()):
+            pool.workers.append(pipeline.Pipeline(slot=s, pool=pool))
+    assert [w.key() for w in pool.workers] == ["k" * 12, "key-b-1111", "k" * 12, "key-b-1111"]
+    # many threads claiming at once: each queued part is handed out exactly once
+    got, lock = [], _th.Lock()
+
+    def grab():
+        j = store.claim_next_job()
+        if j:
+            with lock:
+                got.append(j["id"])
+
+    threads = [_th.Thread(target=grab) for _ in range(12)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(got) == len(set(got)) == len(store.jobs())
+
+
 def test_parallel_keys_share_the_queue_and_a_bad_key_only_benches_itself(env):
     import time
     import pipeline

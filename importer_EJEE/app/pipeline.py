@@ -264,7 +264,9 @@ class Pipeline:
 
     def key(self) -> str | None:
         keys = store.meta_keys()
-        return keys[self.slot] if self.slot < len(keys) else None
+        if not keys or self.slot >= len(keys) * workers_per_key():
+            return None
+        return keys[self.slot % len(keys)]  # slots 0..n-1 = one per key, n..2n-1 = second per key, ...
 
     # control ------------------------------------------------------------
     def start(self):
@@ -318,7 +320,7 @@ class Pipeline:
         # (No pool = old single-worker behaviour: always pause the queue.)
         if kind in ("meta", "rate") and self.pool is not None and self.pool.active_count() > 1:
             import time
-            self.parked = f"key {self.slot + 1}: {message}"
+            self.parked = f"key {self.slot % max(1, len(store.meta_keys())) + 1}: {message}"
             self.parked_kind, self.parked_at = kind, time.time()
             return
         store.set_queue(True, message, kind)
@@ -526,8 +528,16 @@ class Pipeline:
         raise ValueError(stage)
 
 
+def workers_per_key() -> int:
+    """Parallel parts per Meta key (EJEE_APP_WORKERS_PER_KEY, default 1, max 4)."""
+    try:
+        return min(4, max(1, int(os.environ.get("EJEE_APP_WORKERS_PER_KEY", "1"))))
+    except ValueError:
+        return 1
+
+
 class Pool:
-    """One worker per Meta API key, all taking parts from the same ordered queue."""
+    """``workers_per_key()`` workers per Meta API key, all taking parts from the same ordered queue."""
 
     def __init__(self, runner=default_runner, publisher=remote.publish):
         self.runner, self.publisher = runner, publisher
@@ -539,7 +549,7 @@ class Pool:
     def ensure(self):
         """Start workers up to the number of saved keys (call after Settings change)."""
         with self._lock:
-            want = max(1, len(store.meta_keys()))
+            want = max(1, len(store.meta_keys())) * workers_per_key()
             while len(self.workers) < want:
                 w = Pipeline(self.runner, self.publisher, slot=len(self.workers), pool=self)
                 w.wake, w.stop_flag = self.wake, self.stop_flag

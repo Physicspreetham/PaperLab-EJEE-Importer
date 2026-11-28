@@ -265,12 +265,16 @@ def enqueue_cart() -> list[int]:
 
 def claim_next_job() -> dict | None:
     """Atomically take the first queued part (parallel workers never collide)."""
-    with connect() as c:
-        row = c.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
-        if not row:
-            return None
-        c.execute("UPDATE jobs SET status='running', updated_at=? WHERE id=? AND status='queued'", (now(), row["id"]))
-        return _job(c.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
+    for _ in range(50):
+        with connect() as c:
+            row = c.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+            if not row:
+                return None
+            cur = c.execute("UPDATE jobs SET status='running', updated_at=? WHERE id=? AND status='queued'",
+                            (now(), row["id"]))
+            if cur.rowcount == 1:  # we won it; another worker may have taken it between SELECT and UPDATE
+                return _job(c.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
+    return None
 
 
 def update_job(job_id, **fields):
